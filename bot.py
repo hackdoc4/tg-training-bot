@@ -33,8 +33,13 @@ CACHE_TTL = 60
 _cache_data: List[Dict[str, str]] = []
 _cache_time: float = 0.0
 
-# Локальный кэш статусов пользователей, чтобы не ждать обновления CSV от Google после одобрения
+# Запасной кэш на случай временного сбоя чтения CSV из Google Sheets
 _user_status_override: Dict[int, str] = {}
+
+
+def with_cache_buster(url: str) -> str:
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}_t={int(time.time())}"
 
 
 class RegState(StatesGroup):
@@ -89,22 +94,23 @@ async def get_rows(force: bool = False) -> List[Dict[str, str]]:
 async def get_user_status(user_id: int) -> Optional[str]:
     if user_id == ADMIN_ID:
         return "approved"
-    if user_id in _user_status_override:
-        return _user_status_override[user_id]
     if not USERS_CSV_URL:
-        return None
+        return _user_status_override.get(user_id)
 
     try:
-        users = await fetch_csv(USERS_CSV_URL)
+        users = await fetch_csv(with_cache_buster(USERS_CSV_URL))
         for u in users:
             if u.get("user_id") == str(user_id):
                 status = u.get("status", "").lower()
                 if status:
                     _user_status_override[user_id] = status
                     return status
+        # Если пользователь не найден в актуальной таблице — сбрасываем локальный кэш
+        _user_status_override.pop(user_id, None)
+        return None
     except Exception as e:
         logging.error(f"Ошибка чтения листа Users: {e}")
-    return None
+        return _user_status_override.get(user_id)
 
 
 async def send_to_apps_script(payload: dict) -> bool:
